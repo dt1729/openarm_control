@@ -1,139 +1,317 @@
+#!/usr/bin/env python3
+import argparse
+import signal
+import time
+from pathlib import Path
+
 import mujoco
 import mujoco.viewer
-import time
 import numpy as np
+import yaml
 
-from typing import TypedDict
-from pathlib import Path
 from controller_impl import FF_Controllers, ControllerData
 
-# --- GLOBAL CONTROL STATE ---
-# This dictionary tracks which keys are being pressed
-key_state = {
-    "quit": False,
-    "reset": False,
-    "active_actuator": 0,
-    "direction": 0  # 1 for forward, -1 for backward, 0 for static
-}
 
-def keyboard_callback(keycode):
-    """
-    Only used to update our internal state. 
-    Logic happens in the main loop.
-    """
-    global key_state
-    
-    # Q to Quit
-    if keycode == 81: 
-        key_state["quit"] = True
+class MuJoCoSimulation:
+    """MuJoCo simulation for OpenArm with cascaded PID control."""
 
-def cascaded_controller_call(position_control : FF_Controllers, velocity_control : FF_Controllers, model : mujoco.MjModel, data :mujoco.MjData, pos_controller_data : ControllerData, vel_controller_data : ControllerData):
-    pos_signal, pos_controller_data._prev_int, pos_controller_data._prev_err = position_control.FF_PID_controller(np.array([0 for i in range(7)]),\
-                                                                                    pos_controller_data._ref,\
-                                                                                    pos_controller_data._fb,\
-                                                                                    pos_controller_data._prev_int,\
-                                                                                    pos_controller_data._prev_err)
+    def __init__(self, model_path: str, config_path: str, arm_side: str = "left_arm"):
+        """
+        Initialize MuJoCo simulation.
 
-    # for gravity compensation update the first term with gravity compensation controller and required torque setpoint for min jerk.
-    vel_signal, vel_controller_data._prev_int, vel_controller_data._prev_err = velocity_control.FF_PID_controller(np.array([0 for i in range(7)]),\
-                                                                                    vel_controller_data._ref + pos_signal,\
-                                                                                    vel_controller_data._fb,\
-                                                                                    vel_controller_data._prev_int,\
-                                                                                    vel_controller_data._prev_err)
-    
-    return vel_signal, pos_controller_data, vel_controller_data                               
+        Args:
+            model_path: Path to the MJCF model file
+            config_path: Path to the YAML config file for controller gains
+            arm_side: Either 'left_arm' or 'right_arm'
+        """
+        if arm_side not in ['left_arm', 'right_arm']:
+            raise ValueError(f"Invalid arm_side: {arm_side}. Must be 'left_arm' or 'right_arm'.")
 
-# 1. Load the model
-# Ensure 'openarm.xml' and its mesh folder are in the same directory as this script.
-try:
-    _parent_dir = Path.cwd().parent
-    model = mujoco.MjModel.from_xml_path(str(_parent_dir) + '/models/openarm_mujoco/v1/openarm_bimanual.xml')
-    data = mujoco.MjData(model)
-    model.opt.gravity = (0, 0, -9.81)
-except ValueError as e:
-    print(f"Error loading XML: {e}")
-    exit()
+        self.arm_side = arm_side
+        self.running = True
 
-# 2. Setup control parameters
-num_actuators = model.nu
-print(f"Detected {num_actuators} actuators in the OpenArm model.")
+        # Load MuJoCo model
+        print(f"Loading MuJoCo model from: {model_path}")
+        self.model = mujoco.MjModel.from_xml_path(model_path)
+        self.data = mujoco.MjData(self.model)
+        self.model.opt.gravity = (0, 0, -9.81)
 
-# Print actuator names for debugging
-for i in range(num_actuators):
-    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
-    print(f"Index {i}: Actuator Name: {name}")
+        # Load configuration
+        self.config = self._load_config(config_path)
 
-prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
-joint_names = [f"{prefix}_joint{i}" for i in range(1, 8)]
+        # Setup arm joints
+        self._setup_arm(arm_side)
 
-# Get joint IDs
-joint_ids = []
-for joint_name in joint_names:
-    try:
-        joint_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
-        joint_ids.append(joint_id)
-    except KeyError:
-        raise ValueError(f"Joint {joint_name} not found in model")
+        # Setup controllers
+        self._setup_controllers(self.config)
 
+        # Setup signal handler for graceful shutdown
+        signal.signal(signal.SIGINT, self._signal_handler)
 
-pos_cntrlr, vel_cntrlr  = FF_Controllers(), FF_Controllers()
-pos_state = ControllerData(np.zeros(model.nu), np.zeros(model.nu), np.zeros(model.nu), np.zeros(model.nu))
-vel_state = ControllerData(np.zeros(model.nu), np.zeros(model.nu), np.zeros(model.nu), np.zeros(model.nu))
+        print("=== MuJoCo Simulation Initialized ===")
+        print(f"Arm side       : {arm_side}")
+        print(f"Model path     : {model_path}")
+        print(f"Config path    : {config_path}")
+        print(f"Number of DOFs : {len(self.joint_ids)}")
+        print(f"Timestep       : {self.model.opt.timestep}")
 
-# 3. Launch the simulation
-with mujoco.viewer.launch_passive(model, data, key_callback=keyboard_callback) as viewer:
-    start_time = time.time()    
-    while viewer.is_running()and not key_state["quit"]:
-        step_start = time.time()
-        elapsed = time.time() - start_time
+    def _load_config(self, config_path: str) -> dict:
+        """
+        Load controller configuration from YAML file.
 
-        vel_state._fb = np.array([data.qvel[joint_id] for joint_id in joint_ids])
-        pos_state._fb = np.array([data.qpos[joint_id] for joint_id in joint_ids])
-        # --- Controls Algorithm goes here --- 
-        # 1. Get feedback of all actuators.
-        # 2. Bin the feedbacks as per left, right arm.
-        # 3. For each arm 
-        #   i. For each actuator
-        #       a. Call PID controller for Position -> Velocity control based on position set point
-        #           - Call PID controller for Velocity -> Torque control based on d(position)/dt set point
-        #               4. Send cmd to data.ctrl for each 
-        # Block Diagram for the same
-        #                               Vel Feed-forward       Cur Feed-forward
-        #                                      |                       |   
-        #                                      v                       v
-        #                                     (+)                     (+)
-        #  Pos     +---+   +------------+   +---+   +------------+   +---+   +------------+   +-------+
-        #  Cmd --->| Σ |-->|  Position  |-->| Σ |-->|  Velocity  |-->| Σ |-->|  Current   |-->| Power |--+--> ( M ) -- Load
-        #   (+)    +-^-+   | Controller |   +-^-+   | Controller |   +-^-+   | Controller |   | Stage |  |      |
-        #            | (-) +------------+     | (-) +------------+     | (-) +------------+   +-------+  |      |
-        #            |                        |                        |                                 |      |
-        #            |                      +----+                     +-------- Current Feedback -------+      |
-        #            |                      |d/dt|                                                              |
-        #            |                      +--^-+                          Position Feedback                   |
-        #            |                         |                                (Encoder)                       |
-        #            +-------------------------+----------------------------------------------------------------+
+        Args:
+            config_path: Path to the YAML config file
 
+        Returns:
+            Parsed configuration dictionary
+        """
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        return config
 
+    def _setup_arm(self, arm_side: str):
+        """
+        Setup joint names and IDs for the specified arm.
 
-        # --- SEND COMMANDS TO ALL ACTUATORS ---
-        # We generate a unique sine wave for each joint to see them all moving
+        Args:
+            arm_side: Either 'left_arm' or 'right_arm'
+        """
+        prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
+        self.joint_names = [f"{prefix}_joint{i}" for i in range(1, 8)]
+
+        # Get joint IDs
+        self.joint_ids = []
+        for joint_name in self.joint_names:
+            try:
+                joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+                self.joint_ids.append(joint_id)
+            except KeyError:
+                raise ValueError(f"Joint {joint_name} not found in model")
+
+        print(f"Found {len(self.joint_ids)} joints for {arm_side}")
+
+        # Print actuator info
+        num_actuators = self.model.nu
+        print(f"Detected {num_actuators} actuators in the OpenArm model.")
         for i in range(num_actuators):
-            # Amplitude and frequency for the motion
-            amplitude = 0.5 
-            frequency = 1.0
-            
-            cascaded_controller_call(pos_cntrlr, vel_cntrlr, model, data, pos_controller_data=pos_data, vel_controller_data=vel_data)
-            # Calculate command: ctrl = sin(t + offset)
-            # data.ctrl maps directly to the 'actuator' tags in your XML
-            data.ctrl[i] = amplitude * np.sin(frequency * elapsed + (i * 0.5))
-        # 4. Step the physics
-        mujoco.mj_step(model, data)
-        mujoco.mj_forward(model, data)
+            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
+            print(f"  Index {i}: {name}")
 
-        # 5. Sync viewer with the new state
-        viewer.sync()
+    def _setup_controllers(self, config: dict):
+        """
+        Initialize PID controllers and state from config.
 
-        # 6. Maintain real-time frequency (e.g., 60Hz or based on model timestep)
-        time_until_next_step = model.opt.timestep - (time.time() - step_start)
-        if time_until_next_step > 0:
-            time.sleep(time_until_next_step)
+        Args:
+            config: Configuration dictionary with controller gains
+        """
+        dt = config.get('dt', self.model.opt.timestep)
+        num_joints = len(self.joint_ids)
+
+        # Position controller
+        pos_cfg = config['position_controller']
+        self.pos_controller = FF_Controllers(
+            _kp=np.array(pos_cfg['kp']),
+            _ki=np.array(pos_cfg['ki']),
+            _kd=np.array(pos_cfg['kd']),
+            _dt=dt,
+            _kgc=np.array(pos_cfg.get('kgc', [0.0] * num_joints)),
+            _use_ff=[False] * num_joints,
+            _max_lim=np.array(pos_cfg['max_lim']),
+            _min_lim=np.array(pos_cfg['min_lim']),
+            model=self.model,
+            data=self.data
+        )
+
+        # Velocity controller
+        vel_cfg = config['velocity_controller']
+        self.vel_controller = FF_Controllers(
+            _kp=np.array(vel_cfg['kp']),
+            _ki=np.array(vel_cfg['ki']),
+            _kd=np.array(vel_cfg['kd']),
+            _dt=dt,
+            _kgc=np.array(vel_cfg.get('kgc', [0.0] * num_joints)),
+            _use_ff=[False] * num_joints,
+            _max_lim=np.array(vel_cfg['max_lim']),
+            _min_lim=np.array(vel_cfg['min_lim']),
+            model=self.model,
+            data=self.data
+        )
+
+        # Controller state
+        self.pos_state = ControllerData(
+            _ref=np.zeros(num_joints),
+            _fb=np.zeros(num_joints),
+            _prev_int=np.zeros(num_joints),
+            _prev_err=np.zeros(num_joints)
+        )
+
+        self.vel_state = ControllerData(
+            _ref=np.zeros(num_joints),
+            _fb=np.zeros(num_joints),
+            _prev_int=np.zeros(num_joints),
+            _prev_err=np.zeros(num_joints)
+        )
+
+    def _signal_handler(self, sig, frame):
+        """Handle Ctrl+C signal for graceful shutdown."""
+        print("\nCtrl+C detected. Shutting down...")
+        self.running = False
+
+    def _keyboard_callback(self, keycode: int):
+        """
+        Handle keyboard input from viewer.
+
+        Args:
+            keycode: Key code from MuJoCo viewer
+        """
+        # Q key to quit
+        if keycode == 81:
+            self.running = False
+
+    def _cascaded_controller_call(self) -> np.ndarray:
+        """
+        Execute cascaded position -> velocity control.
+
+        Returns:
+            Control signal (torque command)
+        """
+        # Position controller: outputs velocity setpoint
+        pos_signal, self.pos_state._prev_int, self.pos_state._prev_err = \
+            self.pos_controller.FF_PID_controller(
+                np.zeros(len(self.joint_ids)),  # No feedforward for position
+                self.pos_state._ref,
+                self.pos_state._fb,
+                self.pos_state._prev_int,
+                self.pos_state._prev_err
+            )
+
+        # Velocity controller: outputs torque command
+        # Velocity reference = velocity feedforward + position controller output
+        vel_signal, self.vel_state._prev_int, self.vel_state._prev_err = \
+            self.vel_controller.FF_PID_controller(
+                np.zeros(len(self.joint_ids)),  # Gravity compensation can go here
+                self.vel_state._ref + pos_signal,
+                self.vel_state._fb,
+                self.vel_state._prev_int,
+                self.vel_state._prev_err
+            )
+
+        return vel_signal
+
+    def run(self):
+        """Run the main simulation loop with viewer."""
+        print("Starting simulation...")
+
+        with mujoco.viewer.launch_passive(
+            self.model, self.data, key_callback=self._keyboard_callback
+        ) as viewer:
+            start_time = time.time()
+
+            while viewer.is_running() and self.running:
+                step_start = time.time()
+                elapsed = time.time() - start_time
+
+                # Read feedback from simulation
+                self.pos_state._fb = np.array([
+                    self.data.qpos[joint_id] for joint_id in self.joint_ids
+                ])
+                self.vel_state._fb = np.array([
+                    self.data.qvel[joint_id] for joint_id in self.joint_ids
+                ])
+
+                # Generate test trajectory (sine wave for now)
+                # TODO: Replace with actual trajectory generator
+                for i in range(len(self.joint_ids)):
+                    amplitude = 0.5
+                    frequency = 0.5
+                    self.pos_state._ref[i] = amplitude * np.sin(frequency * elapsed + i * 0.5)
+
+                # Compute control
+                control_signal = self._cascaded_controller_call()
+
+                # Apply control to actuators
+                # Note: Mapping depends on actuator configuration in MJCF
+                for i, joint_id in enumerate(self.joint_ids):
+                    if i < self.model.nu:
+                        self.data.ctrl[i] = control_signal[i]
+
+                # Step physics
+                mujoco.mj_step(self.model, self.data)
+                mujoco.mj_forward(self.model, self.data)
+
+                # Sync viewer
+                viewer.sync()
+
+                # Maintain real-time
+                time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
+                if time_until_next_step > 0:
+                    time.sleep(time_until_next_step)
+
+        self.cleanup()
+
+    def cleanup(self):
+        """Perform cleanup on shutdown."""
+        print("Simulation shutdown complete.")
+
+
+def main():
+    """Main entry point with CLI argument parsing."""
+    parser = argparse.ArgumentParser(description='MuJoCo simulation for OpenArm')
+    parser.add_argument(
+        '--model_path',
+        type=str,
+        default=None,
+        help='Path to MJCF model file (default: models/openarm_mujoco/v1/openarm_bimanual.xml)'
+    )
+    parser.add_argument(
+        '--config',
+        type=str,
+        default=None,
+        help='Path to YAML config file (default: config/sim_config.yaml)'
+    )
+    parser.add_argument(
+        '--arm_side',
+        type=str,
+        choices=['left_arm', 'right_arm'],
+        default='left_arm',
+        help='Which arm to control (default: left_arm)'
+    )
+
+    args = parser.parse_args()
+
+    # Determine paths relative to script location
+    script_dir = Path(__file__).parent
+    repo_root = script_dir.parent
+
+    if args.model_path is None:
+        model_path = repo_root / 'models' / 'openarm_mujoco' / 'v1' / 'openarm_bimanual.xml'
+    else:
+        model_path = Path(args.model_path)
+
+    if args.config is None:
+        config_path = script_dir / 'config' / 'sim_config.yaml'
+    else:
+        config_path = Path(args.config)
+
+    # Validate paths
+    if not model_path.exists():
+        print(f"Error: Model file not found: {model_path}")
+        return 1
+
+    if not config_path.exists():
+        print(f"Error: Config file not found: {config_path}")
+        return 1
+
+    # Create and run simulation
+    sim = MuJoCoSimulation(
+        model_path=str(model_path),
+        config_path=str(config_path),
+        arm_side=args.arm_side
+    )
+    sim.run()
+
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())

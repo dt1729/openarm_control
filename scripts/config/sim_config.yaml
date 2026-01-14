@@ -1,0 +1,23 @@
+# MuJoCo Simulation Controller Configuration
+# Controller gains for OpenArm cascaded control
+
+# Timestep (should match MuJoCo model timestep)
+dt: 0.002
+
+# Position controller (outputs velocity setpoint)
+position_controller:
+  kp: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  ki: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  kd: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  kgc: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  max_lim: [10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+  min_lim: [-10.0, -10.0, -10.0, -10.0, -10.0, -10.0, -10.0]
+
+# Velocity controller (outputs torque command)
+velocity_controller:
+  kp: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+  ki: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  kd: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]
+  kgc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  max_lim: [50.0, 50.0, 30.0, 30.0, 10.0, 10.0, 10.0]
+  min_lim: [-50.0, -50.0, -30.0, -30.0, -10.0, -10.0, -10.0]
