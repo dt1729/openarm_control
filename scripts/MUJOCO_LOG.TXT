@@ -1,0 +1,3 @@
+Sat Jan 10 19:55:58 2026
+WARNING: mju_openResource: unknown file '<property object at 0x7fb210601950>/models/openarm_mujoco/v1/openarm_bimanual.xml'
+
