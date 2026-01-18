@@ -12,7 +12,7 @@ class Observer:
     """Records control signals and state feedback for analysis.
 
     Usage:
-        obs = Observer(num_joints=7)
+        obs = Observer(num_joints=7, dt=0.002)
 
         # In simulation loop:
         obs.record(
@@ -28,6 +28,7 @@ class Observer:
         data = obs.get_data()
     """
     num_joints: int = 7
+    dt: float = 0.002  # Sampling time in seconds
 
     # Internal storage (lists for efficient appending)
     _time: list = field(default_factory=list)
@@ -87,10 +88,12 @@ class Observer:
         """Get all recorded data as numpy arrays.
 
         Returns:
-            Dictionary with keys: time, pos_ref, pos_fb, vel_ref, vel_fb, torque_cmd
+            Dictionary with keys: dt, time, pos_ref, pos_fb, vel_ref, vel_fb, torque_cmd
         """
         self.to_arrays()
-        return self._cached_data.copy()
+        data = self._cached_data.copy()
+        data['dt'] = self.dt
+        return data
 
     def clear(self) -> None:
         """Clear all recorded data."""
@@ -121,7 +124,8 @@ class Observer:
                  vel_ref=self._cached_data['vel_ref'],
                  vel_fb=self._cached_data['vel_fb'],
                  torque_cmd=self._cached_data['torque_cmd'],
-                 num_joints=self.num_joints)
+                 num_joints=self.num_joints,
+                 dt=self.dt)
         print(f"Data saved to {path}")
 
     def load(self, filepath: str) -> None:
@@ -138,6 +142,7 @@ class Observer:
 
         self.clear()
         self.num_joints = int(data['num_joints'])
+        self.dt = float(data['dt'])
 
         # Load into lists
         self._time = data['time'].tolist()
@@ -157,7 +162,7 @@ class Observer:
             'torque_cmd': data['torque_cmd'],
         }
         self._arrays_cached = True
-        print(f"Data loaded from {path} ({len(self._time)} samples)")
+        print(f"Data loaded from {path} ({len(self._time)} samples, dt={self.dt}s)")
 
     @property
     def num_samples(self) -> int:
