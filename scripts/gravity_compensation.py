@@ -24,11 +24,11 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-try:
-    import openarm_can as oa
-except ImportError:
-    print("Error: openarm_can module not found. Please install it first.")
-    sys.exit(1)
+# try:
+#     import openarm_can as oa
+# except ImportError:
+#     print("Error: openarm_can module not found. Please install it first.")
+#     sys.exit(1)
 
 
 class GravityCompensation:
@@ -187,7 +187,7 @@ class GravityCompensation:
         print("Shutdown complete.")
 
 class GravityCompensationSim:
-    def __init__(self, arm_side: str, can_interface: str, _model : mujoco.Mjmodel, _data : mujoco.Mjdata):
+    def __init__(self, arm_side: str, _model : mujoco.MjModel, _data : mujoco.MjData):
         """
         Initialize gravity compensation controller.
 
@@ -201,7 +201,6 @@ class GravityCompensationSim:
 
 
         self.arm_side = arm_side
-        self.can_interface = can_interface
         self.keep_running = True
 
         # Initialize MuJoCo model and data
@@ -224,7 +223,6 @@ class GravityCompensationSim:
         print(f"Found {len(self.joint_ids)} joints for {arm_side}")
         print("=== OpenArm Gravity Compensation ===")
         print(f"Arm side       : {arm_side}")
-        print(f"CAN interface  : {can_interface}")
         print(f"Number of DOFs : {len(self.joint_ids)}")
 
     def compute_gravity_torques(self, joint_positions: np.ndarray) -> np.ndarray:

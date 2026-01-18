@@ -1,3 +1,6 @@
 [submodule "models/openarm_mujoco"]
 	path = models/openarm_mujoco
 	url = https://github.com/enactic/openarm_mujoco.git
+[submodule "modules/ruckig"]
+	path = modules/ruckig
+	url = https://github.com/pantor/ruckig.git

@@ -10,7 +10,7 @@ import numpy as np
 import yaml
 
 from controller_impl import FF_Controllers, ControllerData
-
+from gravity_compensation import GravityCompensationSim
 
 class MuJoCoSimulation:
     """MuJoCo simulation for OpenArm with cascaded PID control."""
@@ -115,7 +115,7 @@ class MuJoCoSimulation:
             _kd=np.array(pos_cfg['kd']),
             _dt=dt,
             _kgc=np.array(pos_cfg.get('kgc', [0.0] * num_joints)),
-            _use_ff=[False] * num_joints,
+            _use_ff=[False] * num_joints, # Not implemented
             _max_lim=np.array(pos_cfg['max_lim']),
             _min_lim=np.array(pos_cfg['min_lim']),
             model=self.model,
@@ -152,6 +152,8 @@ class MuJoCoSimulation:
             _prev_err=np.zeros(num_joints)
         )
 
+        self._gravity_comp = GravityCompensationSim(self.arm_side, self.model, self.data)
+
     def _signal_handler(self, sig, frame):
         """Handle Ctrl+C signal for graceful shutdown."""
         print("\nCtrl+C detected. Shutting down...")
@@ -184,18 +186,14 @@ class MuJoCoSimulation:
                 self.pos_state._prev_int,
                 self.pos_state._prev_err
             )
-
-        # Velocity controller: outputs torque command
-        # Velocity reference = velocity feedforward + position controller output
         vel_signal, self.vel_state._prev_int, self.vel_state._prev_err = \
             self.vel_controller.FF_PID_controller(
-                np.zeros(len(self.joint_ids)),  # Gravity compensation can go here
+                self._gravity_comp.compute_gravity_torques(self.pos_state._fb),  # Gravity compensation can go here
                 self.vel_state._ref + pos_signal,
                 self.vel_state._fb,
                 self.vel_state._prev_int,
                 self.vel_state._prev_err
             )
-
         return vel_signal
 
     def run(self):
@@ -212,23 +210,17 @@ class MuJoCoSimulation:
                 elapsed = time.time() - start_time
 
                 # Read feedback from simulation
-                self.pos_state._fb = np.array([
-                    self.data.qpos[joint_id] for joint_id in self.joint_ids
-                ])
-                self.vel_state._fb = np.array([
-                    self.data.qvel[joint_id] for joint_id in self.joint_ids
-                ])
+                self.pos_state._fb = self.data.actuator_length[:7] 
+                self.vel_state._fb = self.data.actuator_velocity[:7]
 
                 # Generate test trajectory (sine wave for now)
                 # TODO: Replace with actual trajectory generator
                 for i in range(len(self.joint_ids)):
                     amplitude = 0.5
                     frequency = 0.5
-                    self.pos_state._ref[i] = amplitude * np.sin(frequency * elapsed + i * 0.5)
-
+                self.pos_state._ref = np.array([-2., 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
                 # Compute control
                 control_signal = self._cascaded_controller_call()
-
                 # Apply control to actuators
                 # Note: Mapping depends on actuator configuration in MJCF
                 for i, joint_id in enumerate(self.joint_ids):
@@ -280,7 +272,7 @@ def main():
     args = parser.parse_args()
 
     # Determine paths relative to script location
-    script_dir = Path(__file__).parent
+    script_dir = Path.cwd()
     repo_root = script_dir.parent
 
     if args.model_path is None:
@@ -311,7 +303,6 @@ def main():
     sim.run()
 
     return 0
-
 
 if __name__ == "__main__":
     exit(main())

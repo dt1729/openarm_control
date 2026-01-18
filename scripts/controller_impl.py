@@ -14,7 +14,7 @@ class PID_Controller:
     _dt : float
     _max_lim : np.ndarray
     _min_lim : np.ndarray
-    model : mujoco.Mjmodel
+    model : mujoco.MjModel
     data: mujoco.MjData
     active_joint: int = 0  # Default value
 
@@ -28,11 +28,10 @@ class ControllerData:
 
 #TODO rewrite this with controllerData, simpler arguments and everything
 class FF_Controllers(PID_Controller):
-    def FF_PID_controller(self, _FF_signal : np.ndarray, _set_point : np.ndarray, _state_fb : np.ndarray, _prev_int : np.ndarray, _prev_err : np.ndarray) -> tuple:
+    def FF_PID_controller(self, _FF_signal : np.ndarray, _set_point : np.ndarray, _state_fb : np.ndarray, _prev_int : np.ndarray, _prev_err : np.ndarray):
         """A Feed forward PID controller, user controls FF signal completely, intended for Gravity compensation
 
         Args:
-            _FF_signal(np.ndarray) : Feedforward signal from user
             _set_point(np.ndarray) : Set point values for all the motors in the kinematic chain
             _state_fb (np.ndarray) : State Feedback for velocity
             _prev_int (np.ndarray) : Previous value of integrator term.  
@@ -52,9 +51,8 @@ class FF_Controllers(PID_Controller):
                                         for i in range(len(self._min_lim))])   
 
         # Backwards Trapezoidal integration
-        _int = np.multiply(self._ki, (_prev_int + (_err + self._prev_err)/self._dt))
+        _int = np.multiply(self._ki, (_prev_int + (_err + _prev_err)/self._dt))
         _int = np.clip(_int, self._lim_min_integ, self._lim_max_integ)
         _der = np.multiply(self._kd, (_err - _prev_err)/self._dt)
-        
-        return tuple(np.clip(_prop + _int + _der + _FF_signal, self._min_lim, self._max_lim), _int, _err)
+        return np.clip(_prop + _int + _der + _FF_signal, self._min_lim, self._max_lim), _int, _err
                                                     
