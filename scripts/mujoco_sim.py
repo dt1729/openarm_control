@@ -87,12 +87,26 @@ class MuJoCoSimulation:
                 self.joint_ids.append(joint_id)
             except KeyError:
                 raise ValueError(f"Joint {joint_name} not found in model")
+        self.joint_ids = np.array(self.joint_ids)
 
         print(f"Found {len(self.joint_ids)} joints for {arm_side}")
 
+        # Get actuator IDs for this arm
+        self.actuator_names = [f"{prefix}_actuator{i}" for i in range(1, 8)]
+        self.actuator_ids = []
+        for actuator_name in self.actuator_names:
+            try:
+                actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
+                self.actuator_ids.append(actuator_id)
+            except KeyError:
+                raise ValueError(f"Actuator {actuator_name} not found in model")
+        self.actuator_ids = np.array(self.actuator_ids)
+
+        print(f"Found {len(self.actuator_ids)} actuators for {arm_side}")
+
         # Print actuator info
         num_actuators = self.model.nu
-        print(f"Detected {num_actuators} actuators in the OpenArm model.")
+        print(f"Detected {num_actuators} total actuators in the OpenArm model.")
         for i in range(num_actuators):
             name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
             print(f"  Index {i}: {name}")
@@ -210,8 +224,8 @@ class MuJoCoSimulation:
                 elapsed = time.time() - start_time
 
                 # Read feedback from simulation
-                self.pos_state._fb = self.data.actuator_length[:7] 
-                self.vel_state._fb = self.data.actuator_velocity[:7]
+                self.pos_state._fb = self.data.actuator_length[self.actuator_ids]
+                self.vel_state._fb = self.data.actuator_velocity[self.actuator_ids]
 
                 # Generate test trajectory (sine wave for now)
                 # TODO: Replace with actual trajectory generator
@@ -222,10 +236,7 @@ class MuJoCoSimulation:
                 # Compute control
                 control_signal = self._cascaded_controller_call()
                 # Apply control to actuators
-                # Note: Mapping depends on actuator configuration in MJCF
-                for i, joint_id in enumerate(self.joint_ids):
-                    if i < self.model.nu:
-                        self.data.ctrl[i] = control_signal[i]
+                self.data.ctrl[self.actuator_ids] = control_signal
 
                 # Step physics
                 mujoco.mj_step(self.model, self.data)
