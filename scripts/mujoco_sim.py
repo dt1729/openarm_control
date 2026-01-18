@@ -11,6 +11,8 @@ import yaml
 
 from controller_impl import FF_Controllers, ControllerData
 from gravity_compensation import GravityCompensationSim
+from observer import Observer
+from plotter import SignalPlotter
 
 class MuJoCoSimulation:
     """MuJoCo simulation for OpenArm with cascaded PID control."""
@@ -168,6 +170,9 @@ class MuJoCoSimulation:
 
         self._gravity_comp = GravityCompensationSim(self.arm_side, self.model, self.data)
 
+        # Setup observer for data recording
+        self.observer = Observer(num_joints=num_joints, dt=dt)
+
     def _signal_handler(self, sig, frame):
         """Handle Ctrl+C signal for graceful shutdown."""
         print("\nCtrl+C detected. Shutting down...")
@@ -238,6 +243,16 @@ class MuJoCoSimulation:
                 # Apply control to actuators
                 self.data.ctrl[self.actuator_ids] = control_signal
 
+                # Record data
+                self.observer.record(
+                    time=elapsed,
+                    pos_ref=self.pos_state._ref,
+                    pos_fb=self.pos_state._fb,
+                    vel_ref=self.vel_state._ref,
+                    vel_fb=self.vel_state._fb,
+                    torque_cmd=control_signal
+                )
+
                 # Step physics
                 mujoco.mj_step(self.model, self.data)
                 mujoco.mj_forward(self.model, self.data)
@@ -254,7 +269,14 @@ class MuJoCoSimulation:
 
     def cleanup(self):
         """Perform cleanup on shutdown."""
-        print("Simulation shutdown complete.")
+        print(f"Simulation shutdown complete. Recorded {len(self.observer)} samples.")
+
+        # Plot recorded data
+        if len(self.observer) > 0:
+            print("Generating plots...")
+            plotter = SignalPlotter(self.observer, joint_names=self.joint_names)
+            plotter.plot_all()
+            plotter.show()
 
 
 def main():
