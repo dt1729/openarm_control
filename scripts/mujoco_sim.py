@@ -93,26 +93,6 @@ class MuJoCoSimulation:
 
         print(f"Found {len(self.joint_ids)} joints for {arm_side}")
 
-        # Get actuator IDs for this arm
-        self.actuator_names = [f"{prefix}_actuator{i}" for i in range(1, 8)]
-        self.actuator_ids = []
-        for actuator_name in self.actuator_names:
-            try:
-                actuator_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator_name)
-                self.actuator_ids.append(actuator_id)
-            except KeyError:
-                raise ValueError(f"Actuator {actuator_name} not found in model")
-        self.actuator_ids = np.array(self.actuator_ids)
-
-        print(f"Found {len(self.actuator_ids)} actuators for {arm_side}")
-
-        # Print actuator info
-        num_actuators = self.model.nu
-        print(f"Detected {num_actuators} total actuators in the OpenArm model.")
-        for i in range(num_actuators):
-            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)
-            print(f"  Index {i}: {name}")
-
     def _setup_controllers(self, config: dict):
         """
         Initialize PID controllers and state from config.
@@ -213,6 +193,7 @@ class MuJoCoSimulation:
                 self.vel_state._prev_int,
                 self.vel_state._prev_err
             )
+        print("vel_sig: ", vel_signal)
         return vel_signal
 
     def run(self):
@@ -222,26 +203,26 @@ class MuJoCoSimulation:
         with mujoco.viewer.launch_passive(
             self.model, self.data, key_callback=self._keyboard_callback
         ) as viewer:
-            start_time = time.time()
-
+            elapsed = 0.0
             while viewer.is_running() and self.running:
                 step_start = time.time()
-                elapsed = time.time() - start_time
+                elapsed += self.model.opt.timestep
 
                 # Read feedback from simulation
-                self.pos_state._fb = self.data.actuator_length[self.actuator_ids]
-                self.vel_state._fb = self.data.actuator_velocity[self.actuator_ids]
+                self.pos_state._fb = self.data.actuator_length[self.joint_ids]
+                print(self.pos_state._fb)
+                self.vel_state._fb = self.data.actuator_velocity[self.joint_ids]
 
                 # Generate test trajectory (sine wave for now)
                 # TODO: Replace with actual trajectory generator
                 for i in range(len(self.joint_ids)):
                     amplitude = 0.5
                     frequency = 0.5
-                self.pos_state._ref = np.array([-2., 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+                self.pos_state._ref = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
                 # Compute control
                 control_signal = self._cascaded_controller_call()
                 # Apply control to actuators
-                self.data.ctrl[self.actuator_ids] = control_signal
+                self.data.ctrl[self.joint_ids] = control_signal
 
                 # Record data
                 self.observer.record(
@@ -271,7 +252,7 @@ class MuJoCoSimulation:
         """Perform cleanup on shutdown."""
         print(f"Simulation shutdown complete. Recorded {len(self.observer)} samples.")
 
-        # Plot recorded data
+        # # Plot recorded data
         if len(self.observer) > 0:
             print("Generating plots...")
             plotter = SignalPlotter(self.observer, joint_names=self.joint_names)
