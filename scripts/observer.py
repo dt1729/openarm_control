@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Observer class for recording control system signals."""
 
+import logging
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -126,7 +129,7 @@ class Observer:
                  torque_cmd=self._cached_data['torque_cmd'],
                  num_joints=self.num_joints,
                  dt=self.dt)
-        print(f"Data saved to {path}")
+        logger.info(f"Data saved to {path}")
 
     def load(self, filepath: str) -> None:
         """Load recorded data from a .npz file.
@@ -162,7 +165,7 @@ class Observer:
             'torque_cmd': data['torque_cmd'],
         }
         self._arrays_cached = True
-        print(f"Data loaded from {path} ({len(self._time)} samples, dt={self.dt}s)")
+        logger.info(f"Data loaded from {path} ({len(self._time)} samples, dt={self.dt}s)")
 
     @property
     def num_samples(self) -> int:

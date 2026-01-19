@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import argparse
+import logging
 import os
 import signal
 import sys
@@ -23,6 +24,8 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # try:
 #     import openarm_can as oa
@@ -220,10 +223,10 @@ class GravityCompensationSim:
             except KeyError:
                 raise ValueError(f"Joint {joint_name} not found in model")
 
-        print(f"Found {len(self.joint_ids)} joints for {arm_side}")
-        print("=== OpenArm Gravity Compensation ===")
-        print(f"Arm side       : {arm_side}")
-        print(f"Number of DOFs : {len(self.joint_ids)}")
+        logger.info(f"Found {len(self.joint_ids)} joints for {arm_side}")
+        logger.info("=== OpenArm Gravity Compensation ===")
+        logger.info(f"Arm side       : {arm_side}")
+        logger.info(f"Number of DOFs : {len(self.joint_ids)}")
 
     def compute_gravity_torques(self, joint_positions: np.ndarray) -> np.ndarray:
         """

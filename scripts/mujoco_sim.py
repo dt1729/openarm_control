@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import logging
 import signal
 import time
 from pathlib import Path
@@ -13,6 +14,9 @@ from controller_impl import FF_Controllers, ControllerData
 from gravity_compensation import GravityCompensationSim
 from observer import Observer
 from plotter import SignalPlotter
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 class MuJoCoSimulation:
     """MuJoCo simulation for OpenArm with cascaded PID control."""
@@ -33,7 +37,7 @@ class MuJoCoSimulation:
         self.running = True
 
         # Load MuJoCo model
-        print(f"Loading MuJoCo model from: {model_path}")
+        logger.info(f"Loading MuJoCo model from: {model_path}")
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
         self.model.opt.gravity = (0, 0, -9.81)
@@ -52,12 +56,12 @@ class MuJoCoSimulation:
         # Setup signal handler for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
 
-        print("=== MuJoCo Simulation Initialized ===")
-        print(f"Arm side       : {arm_side}")
-        print(f"Model path     : {model_path}")
-        print(f"Config path    : {config_path}")
-        print(f"Number of DOFs : {len(self.joint_ids)}")
-        print(f"Timestep       : {self.model.opt.timestep}")
+        logger.info("=== MuJoCo Simulation Initialized ===")
+        logger.info(f"Arm side       : {arm_side}")
+        logger.info(f"Model path     : {model_path}")
+        logger.info(f"Config path    : {config_path}")
+        logger.info(f"Number of DOFs : {len(self.joint_ids)}")
+        logger.info(f"Timestep       : {self.model.opt.timestep}")
 
     def _load_config(self, config_path: str) -> dict:
         """
@@ -93,7 +97,7 @@ class MuJoCoSimulation:
                 raise ValueError(f"Joint {joint_name} not found in model")
         self.joint_ids = np.array(self.joint_ids)
 
-        print(f"Found {len(self.joint_ids)} joints for {arm_side}")
+        logger.info(f"Found {len(self.joint_ids)} joints for {arm_side}")
 
     def _setup_controllers(self, config: dict):
         """
@@ -157,7 +161,7 @@ class MuJoCoSimulation:
 
     def _signal_handler(self, sig, frame):
         """Handle Ctrl+C signal for graceful shutdown."""
-        print("\nCtrl+C detected. Shutting down...")
+        logger.warning("Ctrl+C detected. Shutting down...")
         self.running = False
 
     def _keyboard_callback(self, keycode: int):
@@ -187,48 +191,85 @@ class MuJoCoSimulation:
                 self.pos_state._prev_int,
                 self.pos_state._prev_err
             )
+
+        gravity_torques = self._gravity_comp.compute_gravity_torques(self.pos_state._fb)
+        vel_ref_total = self.vel_state._ref + pos_signal
+
         vel_signal, self.vel_state._prev_int, self.vel_state._prev_err = \
             self.vel_controller.FF_PID_controller(
-                self._gravity_comp.compute_gravity_torques(self.pos_state._fb),  # Gravity compensation can go here
-                self.vel_state._ref + pos_signal,
+                gravity_torques,
+                vel_ref_total,
                 self.vel_state._fb,
                 self.vel_state._prev_int,
                 self.vel_state._prev_err
             )
-        print("vel_sig: ", vel_signal)
+
+        # Detailed debug logging
+        pos_error = self.pos_state._ref - self.pos_state._fb
+        vel_error = vel_ref_total - self.vel_state._fb
+        logger.debug(f"pos_ref:        {self.pos_state._ref}")
+        logger.debug(f"pos_fb:         {self.pos_state._fb}")
+        logger.debug(f"pos_error:      {pos_error}")
+        logger.debug(f"vel_ref:        {vel_ref_total}")
+        logger.debug(f"vel_fb:         {self.vel_state._fb}")
+        logger.debug(f"vel_error:      {vel_error}")
+        logger.debug(f"gravity_torque: {gravity_torques}")
+        logger.debug(f"torque_cmd:     {vel_signal}")
+
         return vel_signal
 
-    def run(self):
-        """Run the main simulation loop with viewer."""
-        print("Starting simulation...")
+    def go_to_motor_angles(
+        self,
+        motor_angles: np.ndarray,
+        timeout: float = 30.0
+    ):
+        """
+        Drive the arm to target motor angles headless.
 
-        # with mujoco.viewer.launch_passive(
-        #     self.model, self.data, key_callback=self._keyboard_callback
-        # ) as viewer:
-        elapsed = 0.0
-        step_start = time.time()
-        while time.time() - step_start < 100 and self.running:   
-            elapsed += self.model.opt.timestep
+        Args:
+            motor_angles: Target joint angles (rad), shape (num_joints,)
+            timeout: Wall-clock timeout in seconds (default 30.0)
+        """
+        motor_angles = np.asarray(motor_angles)
+        if motor_angles.shape[0] != len(self.joint_ids):
+            raise ValueError(
+                f"motor_angles has {motor_angles.shape[0]} elements, "
+                f"expected {len(self.joint_ids)}"
+            )
 
+        logger.info(f"Target motor angles: {motor_angles}")
+        logger.info(f"Running headless (wall timeout: {timeout}s)...")
+
+        # Reset observer for fresh recording
+        self.observer.clear()
+
+        # Reset controller states
+        self._reset_controller_states()
+
+        sim_time = 0.0
+        start_wall_time = time.time()
+        next_log_time = 5.0  # Log every 5s wall time
+
+        while self.running:
+            wall_elapsed = time.time() - start_wall_time
+            if wall_elapsed >= timeout:
+                break
             # Read feedback from simulation
             self.pos_state._fb = self.data.actuator_length[self.joint_ids]
-            print(self.pos_state._fb)
             self.vel_state._fb = self.data.actuator_velocity[self.joint_ids]
 
-            # Generate test trajectory (sine wave for now)
-            # TODO: Replace with actual trajectory generator
-            for i in range(len(self.joint_ids)):
-                amplitude = 0.5
-                frequency = 0.5
-            self.pos_state._ref = np.array([1.0, -2., 0.5, 0.5, 1.0, -0.4, 0.4])
+            # Set target as reference
+            self.pos_state._ref = motor_angles
+
             # Compute control
             control_signal = self._cascaded_controller_call()
+
             # Apply control to actuators
             self.data.ctrl[self.joint_ids] = control_signal
 
             # Record data
             self.observer.record(
-                time=elapsed,
+                time=sim_time,
                 pos_ref=self.pos_state._ref,
                 pos_fb=self.pos_state._fb,
                 vel_ref=self.vel_state._ref,
@@ -240,26 +281,145 @@ class MuJoCoSimulation:
             mujoco.mj_step(self.model, self.data)
             mujoco.mj_forward(self.model, self.data)
 
-            # Sync viewer
-            # viewer.sync()
+            sim_time += self.model.opt.timestep
 
-            # # Maintain real-time
-            # time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
-            # if time_until_next_step > 0:
-            #     time.sleep(time_until_next_step)
+            # Log progress every 5s wall time
+            if wall_elapsed >= next_log_time:
+                pos_error = np.abs(motor_angles - self.pos_state._fb)
+                logger.info(f"Wall: {wall_elapsed:.1f}s | Sim: {sim_time:.2f}s | Max error: {np.max(pos_error):.4f} rad")
+                next_log_time += 5.0
+
+        wall_elapsed = time.time() - start_wall_time
+        logger.info(f"Simulation complete. Wall time: {wall_elapsed:.1f}s, Sim time: {sim_time:.3f}s")
+        final_error = np.abs(motor_angles - self.pos_state._fb)
+        logger.info(f"Final position error: {final_error}")
+
+    def _reset_controller_states(self):
+        """Reset controller integral and error states."""
+        num_joints = len(self.joint_ids)
+        self.pos_state._prev_int = np.zeros(num_joints)
+        self.pos_state._prev_err = np.zeros(num_joints)
+        self.vel_state._prev_int = np.zeros(num_joints)
+        self.vel_state._prev_err = np.zeros(num_joints)
+
+    def run(self, replay: bool = True, playback_speed: float = None):
+        """Run a demo moving to fixed target motor angles.
+
+        Args:
+            replay: Whether to replay in 3D viewer after simulation (default True)
+            playback_speed: Playback speed multiplier for 3D viewer. If None,
+                            auto-calculated to complete replay in ~5 seconds.
+        """
+        logger.info("Starting simulation...")
+
+        # Demo target angles
+        target_angles = np.array([1.0, -2., 0.5, 0.5, 1.0, -0.4, 0.4])
+
+        self.go_to_motor_angles(target_angles, timeout=30.0)
 
         self.cleanup()
 
+        if replay:
+            if playback_speed is None:
+                # Auto-calculate: aim for ~5 second replay
+                sim_duration = len(self.observer) * self.observer.dt
+                playback_speed = max(1.0, sim_duration / 5.0)
+                logger.info(f"Auto playback speed: {playback_speed:.1f}x")
+            self.replay_in_viewer(playback_speed=playback_speed)
+
+        self.visualize()
+
+    def visualize(self, save_dir: str = None, show: bool = True):
+        """
+        Visualize recorded data from observer.
+
+        Args:
+            save_dir: Optional directory to save plot images
+            show: Whether to display plots interactively (default True)
+        """
+        if len(self.observer) == 0:
+            logger.warning("No data to visualize. Run go_to_motor_angles() first.")
+            return
+
+        logger.info(f"Generating plots for {len(self.observer)} samples...")
+        plotter = SignalPlotter(self.observer, joint_names=self.joint_names)
+        plotter.plot_all(save_dir=save_dir)
+        if show:
+            plotter.show()
+
+    def save_data(self, filepath: str):
+        """
+        Save recorded observer data to file for later visualization.
+
+        Args:
+            filepath: Path to save .npz file
+        """
+        self.observer.save(filepath)
+
+    def load_data(self, filepath: str):
+        """
+        Load previously saved observer data.
+
+        Args:
+            filepath: Path to .npz file
+        """
+        self.observer.load(filepath)
+
     def cleanup(self):
         """Perform cleanup on shutdown."""
-        print(f"Simulation shutdown complete. Recorded {len(self.observer)} samples.")
+        logger.info(f"Simulation shutdown complete. Recorded {len(self.observer)} samples.")
 
-        # # Plot recorded data
-        if len(self.observer) > 0:
-            print("Generating plots...")
-            plotter = SignalPlotter(self.observer, joint_names=self.joint_names)
-            plotter.plot_all()
-            plotter.show()
+    def replay_in_viewer(self, playback_speed: float = 1.0) -> None:
+        """
+        Replay recorded simulation in MuJoCo 3D viewer.
+
+        Args:
+            playback_speed: Playback multiplier (1.0 = real-time, 2.0 = 2x speed)
+        """
+        if len(self.observer) == 0:
+            logger.warning("No data to replay. Run go_to_motor_angles() first.")
+            return
+
+        # Get recorded data
+        data = self.observer.get_data()
+        pos_fb = data['pos_fb']  # Shape: (num_samples, num_joints)
+        dt = data['dt']
+        num_frames = len(pos_fb)
+
+        logger.info(f"Replaying {num_frames} frames in 3D viewer (playback_speed={playback_speed}x)")
+
+        # Initialize model to first recorded position
+        self.data.qpos[self.joint_ids] = pos_fb[0]
+        mujoco.mj_forward(self.model, self.data)
+
+        # Launch passive viewer
+        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
+            start_time = time.time()
+
+            while viewer.is_running():
+                # Calculate target frame from wall-clock time
+                elapsed_wall = time.time() - start_time
+                sim_time = elapsed_wall * playback_speed
+                frame_idx = int(sim_time / dt)
+
+                # Check if replay is complete
+                if frame_idx >= num_frames:
+                    logger.info("Replay complete.")
+                    break
+
+                # Set joint positions to recorded values
+                self.data.qpos[self.joint_ids] = pos_fb[frame_idx]
+
+                # Update kinematics (no physics step, just forward kinematics)
+                mujoco.mj_forward(self.model, self.data)
+
+                # Sync viewer
+                viewer.sync()
+
+                # Sleep to prevent CPU spinning (1ms)
+                time.sleep(0.001)
+
+        logger.info("Viewer closed.")
 
 
 def main():
@@ -284,8 +444,33 @@ def main():
         default='left_arm',
         help='Which arm to control (default: left_arm)'
     )
+    parser.add_argument(
+        '--log-level',
+        type=str,
+        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
+        default='INFO',
+        help='Logging level (default: INFO). Use DEBUG for detailed control loop output.'
+    )
+    parser.add_argument(
+        '--no-replay',
+        action='store_true',
+        help='Skip 3D viewer replay after simulation'
+    )
+    parser.add_argument(
+        '--playback-speed',
+        type=float,
+        default=None,
+        help='Playback speed multiplier for 3D viewer (default: auto-calculated for ~5s replay)'
+    )
 
     args = parser.parse_args()
+
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
 
     # Determine paths relative to script location
     script_dir = Path.cwd()
@@ -303,11 +488,11 @@ def main():
 
     # Validate paths
     if not model_path.exists():
-        print(f"Error: Model file not found: {model_path}")
+        logger.error(f"Model file not found: {model_path}")
         return 1
 
     if not config_path.exists():
-        print(f"Error: Config file not found: {config_path}")
+        logger.error(f"Config file not found: {config_path}")
         return 1
 
     # Create and run simulation
@@ -316,7 +501,7 @@ def main():
         config_path=str(config_path),
         arm_side=args.arm_side
     )
-    sim.run()
+    sim.run(replay=not args.no_replay, playback_speed=args.playback_speed)
 
     return 0
 

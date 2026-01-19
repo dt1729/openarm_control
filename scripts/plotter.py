@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Signal plotter for control system analysis."""
 
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 from typing import Optional, List
 
 from observer import Observer
+
+logger = logging.getLogger(__name__)
 
 
 class SignalPlotter:
@@ -103,7 +106,7 @@ class SignalPlotter:
             path = Path(save_path)
             path.parent.mkdir(parents=True, exist_ok=True)
             fig.savefig(path, dpi=150, bbox_inches='tight')
-            print(f"Saved: {path}")
+            logger.info(f"Saved: {path}")
 
         self._figures.append(fig)
         return fig
@@ -213,7 +216,7 @@ class SignalPlotter:
             fig_pos.savefig(save_path / 'position_signals.png', dpi=150, bbox_inches='tight')
             fig_vel.savefig(save_path / 'velocity_signals.png', dpi=150, bbox_inches='tight')
             fig_torque.savefig(save_path / 'torque_signals.png', dpi=150, bbox_inches='tight')
-            print(f"Saved figures to {save_path}")
+            logger.info(f"Saved figures to {save_path}")
 
         self._figures.extend(figures)
         return figures
