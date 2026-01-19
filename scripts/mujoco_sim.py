@@ -37,6 +37,8 @@ class MuJoCoSimulation:
         self.model = mujoco.MjModel.from_xml_path(model_path)
         self.data = mujoco.MjData(self.model)
         self.model.opt.gravity = (0, 0, -9.81)
+        self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
+        self.model.opt.timestep = 0.0001
 
         # Load configuration
         self.config = self._load_config(config_path)
@@ -200,51 +202,51 @@ class MuJoCoSimulation:
         """Run the main simulation loop with viewer."""
         print("Starting simulation...")
 
-        with mujoco.viewer.launch_passive(
-            self.model, self.data, key_callback=self._keyboard_callback
-        ) as viewer:
-            elapsed = 0.0
-            while viewer.is_running() and self.running:
-                step_start = time.time()
-                elapsed += self.model.opt.timestep
+        # with mujoco.viewer.launch_passive(
+        #     self.model, self.data, key_callback=self._keyboard_callback
+        # ) as viewer:
+        elapsed = 0.0
+        step_start = time.time()
+        while time.time() - step_start < 100 and self.running:   
+            elapsed += self.model.opt.timestep
 
-                # Read feedback from simulation
-                self.pos_state._fb = self.data.actuator_length[self.joint_ids]
-                print(self.pos_state._fb)
-                self.vel_state._fb = self.data.actuator_velocity[self.joint_ids]
+            # Read feedback from simulation
+            self.pos_state._fb = self.data.actuator_length[self.joint_ids]
+            print(self.pos_state._fb)
+            self.vel_state._fb = self.data.actuator_velocity[self.joint_ids]
 
-                # Generate test trajectory (sine wave for now)
-                # TODO: Replace with actual trajectory generator
-                for i in range(len(self.joint_ids)):
-                    amplitude = 0.5
-                    frequency = 0.5
-                self.pos_state._ref = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2])
-                # Compute control
-                control_signal = self._cascaded_controller_call()
-                # Apply control to actuators
-                self.data.ctrl[self.joint_ids] = control_signal
+            # Generate test trajectory (sine wave for now)
+            # TODO: Replace with actual trajectory generator
+            for i in range(len(self.joint_ids)):
+                amplitude = 0.5
+                frequency = 0.5
+            self.pos_state._ref = np.array([1.0, -2., 0.5, 0.5, 1.0, -0.4, 0.4])
+            # Compute control
+            control_signal = self._cascaded_controller_call()
+            # Apply control to actuators
+            self.data.ctrl[self.joint_ids] = control_signal
 
-                # Record data
-                self.observer.record(
-                    time=elapsed,
-                    pos_ref=self.pos_state._ref,
-                    pos_fb=self.pos_state._fb,
-                    vel_ref=self.vel_state._ref,
-                    vel_fb=self.vel_state._fb,
-                    torque_cmd=control_signal
-                )
+            # Record data
+            self.observer.record(
+                time=elapsed,
+                pos_ref=self.pos_state._ref,
+                pos_fb=self.pos_state._fb,
+                vel_ref=self.vel_state._ref,
+                vel_fb=self.vel_state._fb,
+                torque_cmd=control_signal
+            )
 
-                # Step physics
-                mujoco.mj_step(self.model, self.data)
-                mujoco.mj_forward(self.model, self.data)
+            # Step physics
+            mujoco.mj_step(self.model, self.data)
+            mujoco.mj_forward(self.model, self.data)
 
-                # Sync viewer
-                viewer.sync()
+            # Sync viewer
+            # viewer.sync()
 
-                # Maintain real-time
-                time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
+            # # Maintain real-time
+            # time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
+            # if time_until_next_step > 0:
+            #     time.sleep(time_until_next_step)
 
         self.cleanup()
 
