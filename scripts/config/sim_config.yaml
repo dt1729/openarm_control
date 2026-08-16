@@ -1,23 +1,59 @@
-# MuJoCo Simulation Controller Configuration
-# Controller gains for OpenArm cascaded control
+# MuJoCo Simulation Controller Configuration — OpenArm cascaded control
+#
+# dt is the physics timestep AND the controller sampling interval: the control
+# law runs once per mj_step, so they are the same number by construction.
+dt: 0.001
 
-# Timestep (should match MuJoCo model timestep)
-dt: 0.1
+# ---------------------------------------------------------------------------
+# Trajectory generation
+# ---------------------------------------------------------------------------
+# A step setpoint saturates the actuators no matter how the loops are tuned, so
+# every move is driven by a time-synchronised trapezoidal profile: the joint
+# with the longest travel sets the total duration and all other joints scale
+# their cruise velocity down to arrive at the same instant. The profile's
+# velocity is fed to the inner loop as feedforward.
+motion:
+  enabled: true
+  settle_time: 0.5                                   # hold at start while transients decay
+  max_vel: [1.0, 1.0, 1.2, 1.2, 2.0, 2.0, 2.0]       # rad/s
+  max_acc: [2.0, 2.0, 2.5, 2.5, 4.0, 4.0, 4.0]       # rad/s^2
 
-# Position controller (outputs velocity setpoint)
+# ---------------------------------------------------------------------------
+# Position controller: joint angle error -> velocity setpoint
+# ---------------------------------------------------------------------------
+# P-only; the inner loop carries integral action. kp = 1/tau_p with tau_p=0.3s.
+# Limits are JOINT VELOCITY limits in rad/s — this loop emits a velocity, not
+# an angle.
 position_controller:
-  kp: [10, 10., 3., 10.1, 5., 15.0, 5.0]
-  ki: [5.0, 0.0, 1.0, 4.0, 0.0, 9.1, 0.0]
-  kd: [0.0, 2., 0.0, 0.0, 3.0, 0.0, 0.0]
+  kp:  [3.3333, 3.3333, 3.3333, 3.3333, 3.3333, 3.3333, 3.3333]
+  ki:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  kd:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   kgc: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-  max_lim: [1.3962629999999998, 0.17453267320510335, 1.570796, 2.443461, 1.570796, 0.785398, 1.570796]
-  min_lim: [-3.490659, -3.3161253267948965, -1.570796, 0.0, -1.570796, -0.785398,-1.570796]
+  max_lim: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+  min_lim: [-1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]
 
-# Velocity controller (outputs torque command)
+# ---------------------------------------------------------------------------
+# Velocity controller: velocity error -> torque, with gravity feedforward
+# ---------------------------------------------------------------------------
+# Gains are sized from measured effective joint inertia (scripts/autogain.py):
+#     kp = M_eff / tau_v      with tau_v = 0.02 s
+#     ki = kp / 0.2
+# Measured M_eff (kg m^2), worst case over sampled poses:
+#     [0.0861, 0.4612, 0.0077, 0.0183, 0.0010, 0.0049, 0.0033]
+# The shoulder-to-wrist inertia ratio is ~446x, so a uniform gain profile
+# cannot be stable across all seven joints — these MUST scale with inertia.
+#
+# Torque limits are the actuator ratings:
+#     DM8009 on joints 1-2, DM4340 on joints 3-4, DM4310 on joints 5-7.
 velocity_controller:
-  kp: [100.0, 100., 10.0, 2.0, 5.0, 14.55, 2.55]
-  ki: [0.0, 0.0, 0.0, 0.2, 1.0, 2.0, 1.0]
-  kd: [0.0, 0.0, 0.0, 0.1, 0.0, 2., 0.5]
+  kp:  [4.3058, 23.0614, 0.3844, 0.9166, 0.0518, 0.2449, 0.1628]
+  ki:  [21.5289, 115.3068, 1.9222, 4.5829, 0.2588, 1.2246, 0.8140]
+  kd:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   kgc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-  max_lim: [40, 40, 27, 27, 7,7,7]
-  min_lim: [-40, -40, -27, -27, -7,-7,-7]
+  max_lim: [40, 40, 27, 27, 7, 7, 7]
+  min_lim: [-40, -40, -27, -27, -7, -7, -7]
+
+# Joint angle limits (rad) — reference clamping, not a controller output bound.
+joint_limits:
+  max: [1.3962629999999998, 0.17453267320510335, 1.570796, 2.443461, 1.570796, 0.785398, 1.570796]
+  min: [-3.490659, -3.3161253267948965, -1.570796, 0.0, -1.570796, -0.785398, -1.570796]

@@ -61,6 +61,8 @@ class GravityCompensation:
         print(f"Loading MuJoCo model from: {mjcf_path}")
         self.model = mujoco.MjModel.from_xml_path(mjcf_path)
         self.data = mujoco.MjData(self.model)
+        # Scratch buffer for the gravity solve; see compute_gravity_torques.
+        self._gc_data = mujoco.MjData(self.model)
 
         # Determine joint names based on arm side
         prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
@@ -125,23 +127,22 @@ class GravityCompensation:
         Returns:
             Array of gravity compensation torques
         """
-        # pdb.set_trace()
-        # Set joint positions in MuJoCo data
+        # Mirror the live configuration onto the scratch buffer, then override
+        # this arm's joints with the commanded positions.
+        self._gc_data.qpos[:] = self.data.qpos
         for i, joint_id in enumerate(self.joint_ids):
-            self.data.qpos[joint_id] = joint_positions[i]
+            self._gc_data.qpos[joint_id] = joint_positions[i]
 
-        # Set velocities to zero for gravity computation
-        self.data.qvel[:] = 0
+        # Zero velocity so qfrc_bias reduces to the gravity term alone
+        # (it otherwise also carries centrifugal and Coriolis forces).
+        self._gc_data.qvel[:] = 0
 
-        # Forward kinematics and dynamics
-        mujoco.mj_forward(self.model, self.data)
+        # Forward kinematics and dynamics on the scratch buffer
+        mujoco.mj_forward(self.model, self._gc_data)
 
-        # Get gravity compensation torques (negative of bias forces)
-        # qfrc_bias contains gravitational, centrifugal and Coriolis forces
-        # Since velocity is zero, it's just gravity
         grav_torques = np.zeros(len(self.joint_ids))
         for i, joint_id in enumerate(self.joint_ids):
-            grav_torques[i] = self.data.qfrc_bias[joint_id]
+            grav_torques[i] = self._gc_data.qfrc_bias[joint_id]
 
         return grav_torques
 
@@ -206,9 +207,15 @@ class GravityCompensationSim:
         self.arm_side = arm_side
         self.keep_running = True
 
-        # Initialize MuJoCo model and data
+        # Initialize MuJoCo model and data.
         self.model = _model
         self.data = _data
+
+        # Scratch state for the gravity solve. compute_gravity_torques must zero
+        # qvel to isolate gravity from Coriolis/centrifugal terms in qfrc_bias --
+        # doing that on the live MjData would erase the simulation's velocity
+        # state on every control step, so the solve runs on its own buffer.
+        self._gc_data = mujoco.MjData(_model)
 
         # Determine joint names based on arm side
         prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
@@ -238,22 +245,23 @@ class GravityCompensationSim:
         Returns:
             Array of gravity compensation torques
         """
-        # pdb.set_trace()
-        # Set joint positions in MuJoCo data
+        # Mirror the live configuration onto the scratch buffer, then override
+        # this arm's joints with the commanded positions. This MUST NOT touch
+        # self.data: it is the live simulation state, and zeroing its qvel here
+        # would erase the arm's velocity on every control step.
+        self._gc_data.qpos[:] = self.data.qpos
         for i, joint_id in enumerate(self.joint_ids):
-            self.data.qpos[joint_id] = joint_positions[i]
+            self._gc_data.qpos[joint_id] = joint_positions[i]
 
-        # Set velocities to zero for gravity computation
-        self.data.qvel[:] = 0
+        # Zero velocity so qfrc_bias reduces to the gravity term alone
+        # (it otherwise also carries centrifugal and Coriolis forces).
+        self._gc_data.qvel[:] = 0
 
-        # Forward kinematics and dynamics
-        mujoco.mj_forward(self.model, self.data)
+        # Forward kinematics and dynamics on the scratch buffer
+        mujoco.mj_forward(self.model, self._gc_data)
 
-        # Get gravity compensation torques (negative of bias forces)
-        # qfrc_bias contains gravitational, centrifugal and Coriolis forces
-        # Since velocity is zero, it's just gravity
         grav_torques = np.zeros(len(self.joint_ids))
         for i, joint_id in enumerate(self.joint_ids):
-            grav_torques[i] = self.data.qfrc_bias[joint_id]
+            grav_torques[i] = self._gc_data.qfrc_bias[joint_id]
 
         return grav_torques

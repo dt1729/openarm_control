@@ -14,6 +14,7 @@ from controller_impl import FF_Controllers, ControllerData
 from gravity_compensation import GravityCompensationSim
 from observer import Observer
 from plotter import SignalPlotter
+from trajectory import TrapezoidalProfile
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -42,10 +43,10 @@ class MuJoCoSimulation:
         self.data = mujoco.MjData(self.model)
         self.model.opt.gravity = (0, 0, -9.81)
         self.model.opt.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
-        self.model.opt.timestep = 0.0001
 
-        # Load configuration
+        # Load configuration (before the timestep, which the config now owns)
         self.config = self._load_config(config_path)
+        self.model.opt.timestep = float(self.config.get('dt', 1e-3))
 
         # Setup arm joints
         self._setup_arm(arm_side)
@@ -90,11 +91,10 @@ class MuJoCoSimulation:
         # Get joint IDs
         self.joint_ids = []
         for joint_name in self.joint_names:
-            try:
-                joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
-                self.joint_ids.append(joint_id)
-            except KeyError:
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if joint_id < 0:
                 raise ValueError(f"Joint {joint_name} not found in model")
+            self.joint_ids.append(joint_id)
         self.joint_ids = np.array(self.joint_ids)
 
         logger.info(f"Found {len(self.joint_ids)} joints for {arm_side}")
@@ -106,8 +106,25 @@ class MuJoCoSimulation:
         Args:
             config: Configuration dictionary with controller gains
         """
-        dt = config.get('dt', self.model.opt.timestep)
+        # The controller sampling interval MUST be the physics step: the loop
+        # runs the control law once per mj_step. A config value that disagrees
+        # silently scales every integral and derivative term.
+        dt = float(self.model.opt.timestep)
+        cfg_dt = config.get('dt', None)
+        if cfg_dt is not None and abs(float(cfg_dt) - dt) > 1e-12:
+            logger.warning(
+                f"config dt={cfg_dt} disagrees with model timestep={dt}; "
+                f"using the model timestep."
+            )
         num_joints = len(self.joint_ids)
+
+        # Motion-profile limits for the trajectory generator
+        self.motion_cfg = config.get('motion', {
+            'enabled': True,
+            'max_vel': [1.0] * num_joints,
+            'max_acc': [1.0] * num_joints,
+            'settle_time': 0.5,
+        })
 
         # Position controller
         pos_cfg = config['position_controller']
@@ -221,14 +238,18 @@ class MuJoCoSimulation:
     def go_to_motor_angles(
         self,
         motor_angles: np.ndarray,
-        timeout: float = 30.0
+        timeout: float = 30.0,
+        sim_duration: float = None
     ):
         """
         Drive the arm to target motor angles headless.
 
         Args:
             motor_angles: Target joint angles (rad), shape (num_joints,)
-            timeout: Wall-clock timeout in seconds (default 30.0)
+            timeout: Wall-clock safety timeout in seconds (default 30.0)
+            sim_duration: Simulated seconds to run. When given, this bounds the
+                run instead of wall time, so results are reproducible across
+                machines; `timeout` remains only as a safety stop.
         """
         motor_angles = np.asarray(motor_angles)
         if motor_angles.shape[0] != len(self.joint_ids):
@@ -246,20 +267,53 @@ class MuJoCoSimulation:
         # Reset controller states
         self._reset_controller_states()
 
+        # Build a time-synchronised trapezoidal reference from the current pose.
+        profile = None
+        if self.motion_cfg.get('enabled', True):
+            q0 = np.array(self.data.actuator_length[self.joint_ids])
+            profile = TrapezoidalProfile(
+                q0=q0,
+                qf=motor_angles,
+                max_vel=np.array(self.motion_cfg['max_vel'], dtype=float),
+                max_acc=np.array(self.motion_cfg['max_acc'], dtype=float),
+                settle_time=float(self.motion_cfg.get('settle_time', 0.0)),
+            )
+            logger.info(
+                f"Trajectory: {profile.duration:.2f}s motion "
+                f"(+{profile.settle_time:.2f}s settle), "
+                f"cruise vel {np.array2string(profile.v, precision=3)}"
+            )
+
         sim_time = 0.0
         start_wall_time = time.time()
         next_log_time = 5.0  # Log every 5s wall time
 
         while self.running:
             wall_elapsed = time.time() - start_wall_time
-            if wall_elapsed >= timeout:
+            if sim_duration is not None:
+                if sim_time >= sim_duration:
+                    break
+                if wall_elapsed >= timeout:
+                    logger.warning(
+                        f"Wall-clock safety timeout hit at sim_time={sim_time:.3f}s "
+                        f"of {sim_duration}s requested."
+                    )
+                    break
+            elif wall_elapsed >= timeout:
                 break
             # Read feedback from simulation
             self.pos_state._fb = self.data.actuator_length[self.joint_ids]
             self.vel_state._fb = self.data.actuator_velocity[self.joint_ids]
 
-            # Set target as reference
-            self.pos_state._ref = motor_angles
+            # Reference comes from the trajectory, not the raw target: a step
+            # setpoint saturates the actuators regardless of gains. qd_ref is
+            # injected as velocity feedforward into the inner loop.
+            if profile is not None:
+                q_ref, qd_ref = profile.at(sim_time)
+                self.pos_state._ref = q_ref
+                self.vel_state._ref = qd_ref
+            else:
+                self.pos_state._ref = motor_angles
 
             # Compute control
             control_signal = self._cascaded_controller_call()
@@ -277,7 +331,8 @@ class MuJoCoSimulation:
                 torque_cmd=control_signal
             )
 
-            # Step physics
+            # Step physics. mj_forward refreshes actuator_length/actuator_velocity
+            # after integration so the next iteration reads current feedback.
             mujoco.mj_step(self.model, self.data)
             mujoco.mj_forward(self.model, self.data)
 
