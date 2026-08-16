@@ -7,6 +7,19 @@ plus an observer/plotter layer for control-signal analysis.
 Seven degrees of freedom per arm, torque-level actuation. The same gravity
 model serves both the simulation path and a CAN hardware path.
 
+![Both arms tracking a five-waypoint joint-space tour](docs/demo.gif)
+
+*Both arms driving a five-waypoint tour, replayed at ~5x. Each leg is a
+time-synchronised trapezoidal profile; the arms run the same pose list
+phase-shifted, with joints 1 and 2 mirrored. Worst-case final joint error
+across all waypoints and both arms: **0.040 rad**.*
+
+Regenerate with:
+
+```bash
+cd scripts && MUJOCO_GL=glfw python3 make_gif.py --dwell 2.0
+```
+
 ---
 
 ## Control architecture
@@ -147,12 +160,48 @@ sim.replay_in_viewer(playback_speed=2.0)
 
 ## Analysis output
 
-`SignalPlotter` produces two layouts from a recorded run:
+`SignalPlotter` produces two layouts from a recorded run. All figures below are
+one 12 s step of the left arm to
+`[1.0, -2.0, 0.5, 0.5, 1.0, -0.4, 0.4]` rad, regenerated with:
 
-- **By joint** — one row per joint: position reference vs feedback, velocity
-  reference vs feedback, torque command.
-- **By signal** — position, velocity and torque across all seven joints, each
-  with reference, feedback, and an explicit error trace.
+```bash
+cd scripts && python3 make_plots.py       # writes docs/plots/
+```
+
+### By signal — reference, feedback and error across all joints
+
+![Position reference, feedback and error for all seven joints](docs/plots/position_signals.png)
+
+The trapezoidal profile is visible directly in the top panel: a 0.5 s settle
+hold, then every joint ramps and **arrives together at ~2.9 s** regardless of
+how far it had to travel — that is the time-synchronisation. Joint 2 covers
+2.0 rad and joint 6 covers 0.4 rad, and both finish at the same instant.
+
+The bottom panel is the one that matters. Tracking error stays inside
+**±0.07 rad** through the whole move and decays to under 0.002 rad. The
+residual wobble between 4 s and 10 s is the last of the settle, not a limit
+cycle — it decreases monotonically.
+
+### By joint — position, velocity and torque per joint
+
+![Per-joint position tracking, velocity and torque command](docs/plots/by_joint.png)
+
+One row per joint. Left column is position reference (dashed) against feedback
+(solid), middle is velocity, right is the commanded torque. Useful when a
+single joint misbehaves: this is the view that isolated joint 5's limit cycle
+to its velocity loop rather than anything global.
+
+<details>
+<summary>Velocity and torque signals</summary>
+
+![Velocity reference, feedback and error](docs/plots/velocity_signals.png)
+![Torque commands for all seven joints](docs/plots/torque_signals.png)
+
+Torque stays well inside the actuator limits (−9.0 to +2.7 Nm against a ±40 Nm
+bound on joint 1), which is what gravity feedforward buys — the loops only have
+to supply the dynamics, not hold the arm up.
+
+</details>
 
 Traces persist to `.npz` through `Observer.save()` and reload with
 `Observer.load()`, so tuning runs can be compared offline without re-simulating.

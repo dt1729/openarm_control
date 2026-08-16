@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import logging
 import signal
 import time
@@ -31,8 +32,11 @@ class MuJoCoSimulation:
             config_path: Path to the YAML config file for controller gains
             arm_side: Either 'left_arm' or 'right_arm'
         """
-        if arm_side not in ['left_arm', 'right_arm']:
-            raise ValueError(f"Invalid arm_side: {arm_side}. Must be 'left_arm' or 'right_arm'.")
+        if arm_side not in ['left_arm', 'right_arm', 'both']:
+            raise ValueError(
+                f"Invalid arm_side: {arm_side}. "
+                f"Must be 'left_arm', 'right_arm' or 'both'."
+            )
 
         self.arm_side = arm_side
         self.running = True
@@ -85,8 +89,14 @@ class MuJoCoSimulation:
         Args:
             arm_side: Either 'left_arm' or 'right_arm'
         """
-        prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
-        self.joint_names = [f"{prefix}_joint{i}" for i in range(1, 8)]
+        # 'both' concatenates left then right into one 14-joint vector. Every
+        # controller operation is elementwise over joints, so the cascade works
+        # unchanged once the gain arrays are tiled to match (_setup_controllers).
+        if arm_side == "both":
+            prefixes = ["openarm_left", "openarm_right"]
+        else:
+            prefixes = ["openarm_left" if arm_side == "left_arm" else "openarm_right"]
+        self.joint_names = [f"{p}_joint{i}" for p in prefixes for i in range(1, 8)]
 
         # Get joint IDs
         self.joint_ids = []
@@ -117,6 +127,19 @@ class MuJoCoSimulation:
                 f"using the model timestep."
             )
         num_joints = len(self.joint_ids)
+
+        # The config is written per-arm (7 entries). When driving both arms the
+        # joint vector is 14 long, so tile every per-joint list to match — the
+        # two arms are identical hardware and share a gain set.
+        if num_joints == 14:
+            config = copy.deepcopy(config)
+            for section in ('position_controller', 'velocity_controller', 'motion'):
+                if section not in config:
+                    continue
+                for key, val in config[section].items():
+                    if isinstance(val, list) and len(val) == 7:
+                        config[section][key] = list(val) + list(val)
+            self.config = config
 
         # Motion-profile limits for the trajectory generator
         self.motion_cfg = config.get('motion', {
@@ -239,7 +262,9 @@ class MuJoCoSimulation:
         self,
         motor_angles: np.ndarray,
         timeout: float = 30.0,
-        sim_duration: float = None
+        sim_duration: float = None,
+        reset_observer: bool = True,
+        time_offset: float = 0.0
     ):
         """
         Drive the arm to target motor angles headless.
@@ -261,8 +286,10 @@ class MuJoCoSimulation:
         logger.info(f"Target motor angles: {motor_angles}")
         logger.info(f"Running headless (wall timeout: {timeout}s)...")
 
-        # Reset observer for fresh recording
-        self.observer.clear()
+        # Reset observer for fresh recording (skipped when chaining waypoints,
+        # so a multi-move sequence lands in one continuous trace)
+        if reset_observer:
+            self.observer.clear()
 
         # Reset controller states
         self._reset_controller_states()
@@ -323,7 +350,7 @@ class MuJoCoSimulation:
 
             # Record data
             self.observer.record(
-                time=sim_time,
+                time=sim_time + time_offset,
                 pos_ref=self.pos_state._ref,
                 pos_fb=self.pos_state._fb,
                 vel_ref=self.vel_state._ref,
@@ -348,6 +375,52 @@ class MuJoCoSimulation:
         logger.info(f"Simulation complete. Wall time: {wall_elapsed:.1f}s, Sim time: {sim_time:.3f}s")
         final_error = np.abs(motor_angles - self.pos_state._fb)
         logger.info(f"Final position error: {final_error}")
+
+    def follow_waypoints(self, waypoints, dwell: float = 0.6,
+                         timeout_per: float = 300.0):
+        """Drive through a list of joint-space waypoints in sequence.
+
+        Each leg gets its own time-synchronised trapezoidal profile, followed by
+        `dwell` seconds holding the pose so the settle is visible. All legs are
+        recorded into a single continuous observer trace.
+
+        Args:
+            waypoints: Iterable of target joint angle arrays (rad)
+            dwell: Seconds to hold at each waypoint after the profile completes
+            timeout_per: Wall-clock safety timeout per leg
+
+        Returns:
+            List of final absolute position errors, one array per leg.
+        """
+        self.observer.clear()
+        errors = []
+        t_offset = 0.0
+
+        for k, wp in enumerate(waypoints):
+            wp = np.asarray(wp, dtype=float)
+
+            # Pre-build the same profile go_to_motor_angles will use, purely to
+            # learn how long this leg takes, so the run is bounded in sim time.
+            q0 = np.array(self.data.actuator_length[self.joint_ids])
+            leg = TrapezoidalProfile(
+                q0=q0, qf=wp,
+                max_vel=np.array(self.motion_cfg['max_vel'], dtype=float),
+                max_acc=np.array(self.motion_cfg['max_acc'], dtype=float),
+                settle_time=float(self.motion_cfg.get('settle_time', 0.0)),
+            )
+            duration = leg.total_time + dwell
+
+            logger.info(f"--- waypoint {k+1}/{len(waypoints)}: {duration:.2f}s ---")
+            self.go_to_motor_angles(
+                wp, timeout=timeout_per, sim_duration=duration,
+                reset_observer=False, time_offset=t_offset,
+            )
+            t_offset += duration
+            err = np.abs(wp - self.data.actuator_length[self.joint_ids])
+            errors.append(err)
+            logger.info(f"    max |err| = {err.max():.5f} rad")
+
+        return errors
 
     def _reset_controller_states(self):
         """Reset controller integral and error states."""
@@ -475,6 +548,79 @@ class MuJoCoSimulation:
                 time.sleep(0.001)
 
         logger.info("Viewer closed.")
+
+    def record_gif(self, path: str, playback_speed: float = None, fps: int = 20,
+                   width: int = 640, height: int = 480,
+                   azimuth: float = 90.0, elevation: float = -12.0,
+                   distance: float = 1.8, lookat=None) -> str:
+        """Render the recorded run to an animated GIF.
+
+        Mirrors `replay_in_viewer`: same recorded trajectory, same
+        wall-clock-to-sim-time mapping, same default playback speed. The only
+        difference is that frames go to an offscreen renderer instead of an
+        interactive viewer, so the result can be written to a file.
+
+        Args:
+            path: Output .gif path
+            playback_speed: Playback multiplier. If None, uses the same rule as
+                run(): sim_duration / 5.0, i.e. a ~5 second replay.
+            fps: Frames per second in the GIF
+            width, height: Frame size in pixels
+
+        Returns:
+            The path written.
+        """
+        from PIL import Image
+
+        if len(self.observer) == 0:
+            logger.warning("No data to record. Run go_to_motor_angles() first.")
+            return None
+
+        data = self.observer.get_data()
+        pos_fb = data['pos_fb']
+        dt = data['dt']
+        num_frames = len(pos_fb)
+        sim_duration = num_frames * dt
+
+        if playback_speed is None:
+            playback_speed = max(1.0, sim_duration / 5.0)
+
+        # One GIF frame every `playback_speed / fps` seconds of simulated time.
+        sim_per_frame = playback_speed / fps
+        idx = np.arange(0, num_frames, max(1, int(round(sim_per_frame / dt))))
+        logger.info(
+            f"Recording {len(idx)} frames at {fps}fps "
+            f"({playback_speed:.1f}x, {sim_duration:.1f}s sim -> "
+            f"{len(idx)/fps:.1f}s gif)"
+        )
+
+        # Seed from the model's <statistic> block (extent/center), then override
+        # with the requested view. Defaults are a front-on framing of the torso.
+        cam = mujoco.MjvCamera()
+        mujoco.mjv_defaultFreeCamera(self.model, cam)
+        if lookat is not None:
+            cam.lookat[:] = np.asarray(lookat, dtype=float)
+        cam.distance = distance
+        cam.azimuth = azimuth
+        cam.elevation = elevation
+
+        frames = []
+        with mujoco.Renderer(self.model, height, width) as renderer:
+            for i in idx:
+                self.data.qpos[self.joint_ids] = pos_fb[i]
+                mujoco.mj_forward(self.model, self.data)
+                renderer.update_scene(self.data, camera=cam)
+                frames.append(Image.fromarray(renderer.render()))
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        frames[0].save(
+            out, save_all=True, append_images=frames[1:],
+            duration=int(1000 / fps), loop=0, optimize=True,
+        )
+        size_mb = out.stat().st_size / 1e6
+        logger.info(f"Wrote {out} ({len(frames)} frames, {size_mb:.2f} MB)")
+        return str(out)
 
 
 def main():

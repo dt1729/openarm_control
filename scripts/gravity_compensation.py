@@ -200,9 +200,11 @@ class GravityCompensationSim:
             can_interface: CAN interface name (e.g., 'can0')
             mjcf_path: Path to the MJCF model file
         """
-        if arm_side not in ['left_arm', 'right_arm']:
-            raise ValueError(f"Invalid arm_side: {arm_side}. Must be 'left_arm' or 'right_arm'.")
-
+        if arm_side not in ['left_arm', 'right_arm', 'both']:
+            raise ValueError(
+                f"Invalid arm_side: {arm_side}. "
+                f"Must be 'left_arm', 'right_arm' or 'both'."
+            )
 
         self.arm_side = arm_side
         self.keep_running = True
@@ -217,9 +219,13 @@ class GravityCompensationSim:
         # state on every control step, so the solve runs on its own buffer.
         self._gc_data = mujoco.MjData(_model)
 
-        # Determine joint names based on arm side
-        prefix = "openarm_left" if arm_side == "left_arm" else "openarm_right"
-        self.joint_names = [f"{prefix}_joint{i}" for i in range(1, 8)]
+        # Determine joint names based on arm side ('both' concatenates left
+        # then right, so every downstream array is simply twice as long)
+        if arm_side == "both":
+            prefixes = ["openarm_left", "openarm_right"]
+        else:
+            prefixes = ["openarm_left" if arm_side == "left_arm" else "openarm_right"]
+        self.joint_names = [f"{p}_joint{i}" for p in prefixes for i in range(1, 8)]
 
         # Get joint IDs
         self.joint_ids = []

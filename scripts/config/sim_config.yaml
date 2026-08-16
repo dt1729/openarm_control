@@ -25,7 +25,7 @@ motion:
 # Limits are JOINT VELOCITY limits in rad/s — this loop emits a velocity, not
 # an angle.
 position_controller:
-  kp:  [3.3333, 3.3333, 3.3333, 3.3333, 3.3333, 3.3333, 3.3333]
+  kp:  [3.3333, 3.3333, 3.3333, 3.3333, 10.0, 3.3333, 3.3333]
   ki:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   kd:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   kgc: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -45,9 +45,20 @@ position_controller:
 #
 # Torque limits are the actuator ratings:
 #     DM8009 on joints 1-2, DM4340 on joints 3-4, DM4310 on joints 5-7.
+#
+# Joint 5 is a hand-tuned exception (scripts/tune_j5.py). The inertia rule gave
+# it kp=0.0518, which left the inner loop too slow to track its own velocity
+# setpoint: joint 5 limit-cycled with a ~3-4 s period while the other six
+# settled exactly. Raising vel kp 30x and cutting vel ki to 0.3x (the integral
+# was driving the wind-up) plus pos kp 3.33 -> 10 fixed it:
+#     settling  never (>12 s) -> 3.0 s
+#     ripple    0.283 -> 0.00057 rad
+#     final     0.0581 -> 0.00126 rad
+# The gap between the derived and working gain suggests the measured inertia
+# under-represents joint 5 in motion; re-derive before trusting the rule here.
 velocity_controller:
-  kp:  [4.3058, 23.0614, 0.3844, 0.9166, 0.0518, 0.2449, 0.1628]
-  ki:  [21.5289, 115.3068, 1.9222, 4.5829, 0.2588, 1.2246, 0.8140]
+  kp:  [4.3058, 23.0614, 0.3844, 0.9166, 1.5540, 0.2449, 0.1628]
+  ki:  [21.5289, 115.3068, 1.9222, 4.5829, 0.0776, 1.2246, 0.8140]
   kd:  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   kgc: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   max_lim: [40, 40, 27, 27, 7, 7, 7]
